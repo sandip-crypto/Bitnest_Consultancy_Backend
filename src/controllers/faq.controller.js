@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const FAQ = require("../models/faq.model");
 const slugify = require("../utils/slugify");
 
@@ -10,7 +11,9 @@ const generateUniqueSlug = async (question, excludeId = null) => {
     while (true) {
         const existing = await FAQ.findOne({
             slug,
-            ...(excludeId ? { _id: { $ne: excludeId } } : {}),
+            ...(excludeId
+                ? { _id: mongoose.trusted({ $ne: excludeId }) }
+                : {}),
         }).select("_id");
 
         if (!existing) return slug;

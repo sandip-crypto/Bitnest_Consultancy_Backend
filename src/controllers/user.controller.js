@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const User = require('../models/user.model');
 const bcrypt = require("bcryptjs");
 const { generateAccessToken, generateRefreshToken } = require('../utils/token');
@@ -112,105 +113,48 @@ const registerUser = async (req, res, next) => {
 
 // Login User
 const loginUser = async (req, res, next) => {
-
     try {
-        let { email, password } = req.body;
+        const { email, password } = req.body;
+        if (!email || !password)
+            return res.status(400).json({ message: 'Email and password required' });
 
-        // 1) Required
-        if (!email || !password) {
-            return res.status(400).json({
-                success: false,
-                message: "Email and password are required",
-            });
-        }
+        const user = await User.findOne({ email }).select('+password');
+        if (!user) return res.status(401).json({ message: 'Invalid credentials' });
 
-        // 2) Type checks
-        if (typeof email !== "string" || typeof password !== "string") {
-            return res.status(400).json({
-                success: false,
-                message: "Invalid input type",
-            });
-        }
-
-        email = email.trim();
-        password = password.trim();
-
-        // 3) Basic constraints
-        if (email.length < 5 || email.length > 100) {
-            return res.status(400).json({
-                success: false,
-                message: "Invalid email length",
-            });
-        }
-
-        if (password.length < 6 || password.length > 100) {
-            return res.status(400).json({
-                success: false,
-                message: "Invalid password length",
-            });
-        }
-
-        // Optional: email regex
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!emailRegex.test(email)) {
-            return res.status(400).json({
-                success: false,
-                message: "Invalid email format",
-            });
-        }
-
-        // 4) Find user by email (now a safe string)
-        const user = await User.findOne({ email }).select("+password");
-        if (!user) {
-            return res.status(401).json({
-                success: false,
-                message: "Invalid credentials",
-            });
-        }
-
-        if (user.status !== "active") {
-            return res.status(403).json({
-                success: false,
-                code: "ACCOUNT_INACTIVE",
-                message:
-                    "Your account has been deactivated. Please contact the administrator.",
-            });
-        }
-
-        // 5) Compare password
         const isMatch = await bcrypt.compare(password, user.password);
-        if (!isMatch) {
-            return res.status(401).json({
-                success: false,
-                message: "Invalid credentials",
-            });
-        }
+        if (!isMatch) return res.status(401).json({ message: 'Invalid credentials' });
 
-        // 6) Generate tokens
-        const accessToken = generateAccessToken(user);
-        const refreshToken = generateRefreshToken(user);
+        // Update last login
+        user.lastLogin = new Date();
 
-        // Hash the refresh token before saving
-        const hashedRefreshToken = await bcrypt.hash(refreshToken, 10);
+        // Create device/session
+        const deviceId = crypto.randomUUID();
+        const refreshToken = generateRefreshToken(user); // unhashed
+        const hashedToken = await bcrypt.hash(refreshToken, 10);
 
-        // 7) Save refresh token in DB (hashed for security)
-        user.refreshToken = hashedRefreshToken;
+        const deviceName = req.headers['user-agent']?.substring(0, 100) || 'Unknown Device';
+        const ip = req.ip;
+
+        user.devices.push({
+            deviceId,
+            deviceName,
+            refreshToken: hashedToken,
+            lastActive: new Date(),
+            ip,
+            userAgent: req.headers['user-agent'] || '',
+        });
+
         await user.save({ validateBeforeSave: false });
 
-        // 8) Set cookies
-        setAuthCookies(res, accessToken, refreshToken);
+        const accessToken = generateAccessToken(user);
 
-        const safeUser = user.toObject();
-        delete safeUser.password;
-        delete safeUser.refreshToken;
+        // Set cookies for frontend
+        setAuthCookies(res, accessToken, refreshToken, deviceId);
 
-        res.status(200).json({
-            success: true,
-            message: "Logged in successfully",
-            user: safeUser,
-        });
-    } catch (error) {
-        next(error);
+        const safeUser = user.toJSON();
+        res.status(200).json({ message: 'Logged in', user: safeUser, deviceId });
+    } catch (err) {
+        next(err);
     }
 };
 
@@ -736,45 +680,26 @@ const getAllUsers = async (req, res, next) => {
 const refreshToken = async (req, res, next) => {
     try {
         const token = req.cookies.refreshToken;
-
-        if (!token) {
-            return res.status(401).json({
-                success: false,
-                message: "No refresh token provided",
-            });
-        }
+        if (!token) return res.status(401).json({ success: false, message: "No refresh token provided" });
 
         let decoded;
         try {
             decoded = jwt.verify(token, process.env.REFRESH_TOKEN_SECRET);
         } catch {
-            return res.status(403).json({
-                success: false,
-                message: "Invalid or expired refresh token",
-            });
+            return res.status(403).json({ success: false, message: "Invalid or expired refresh token" });
         }
 
         const user = await User.findById(decoded.id).select("+refreshToken");
-        if (!user || !user.refreshToken) {
-            return res.status(403).json({
-                success: false,
-                message: "Refresh token not recognized",
-            });
-        }
+        if (!user || !user.refreshToken)
+            return res.status(403).json({ success: false, message: "Refresh token not recognized" });
 
         const isMatch = await bcrypt.compare(token, user.refreshToken);
-        if (!isMatch) {
-            return res.status(403).json({
-                success: false,
-                message: "Refresh token mismatch",
-            });
-        }
+        if (!isMatch) return res.status(403).json({ success: false, message: "Refresh token mismatch" });
 
+        // Generate new tokens
         const newAccessToken = generateAccessToken(user);
         const newRefreshToken = generateRefreshToken(user);
-        const hashedNewRefreshToken = await bcrypt.hash(newRefreshToken, 10);
-
-        user.refreshToken = hashedNewRefreshToken;
+        user.refreshToken = await bcrypt.hash(newRefreshToken, 10);
         await user.save({ validateBeforeSave: false });
 
         setAuthCookies(res, newAccessToken, newRefreshToken);
@@ -782,6 +707,7 @@ const refreshToken = async (req, res, next) => {
         return res.status(200).json({
             success: true,
             message: "Token refreshed",
+            accessToken: newAccessToken, // send new access token to frontend
         });
     } catch (error) {
         next(error);
@@ -855,4 +781,54 @@ const getMe = async (req, res) => {
     });
 };
 
-module.exports = { registerUser, loginUser, logoutUser, changePassword, addUser, editUser, deleteUser, getAllUsers, refreshToken, updateUserStatus, getMe };
+// Update user profile
+const updateProfileInfo = async (req, res, next) => {
+    try {
+        const userId = req.user._id;
+        const { username, phone } = req.body;
+
+        if (!username && !phone) {
+            return res.status(400).json({
+                success: false,
+                message: "At least one field (username or phone) must be provided.",
+            });
+        }
+
+        const user = await User.findById(userId);
+
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: "User not found.",
+            });
+        }
+
+        // Only update fields that are provided
+        if (username) user.username = username;
+        if (phone) user.phone = phone;
+
+        await user.save();
+
+        return res.status(200).json({
+            success: true,
+            message: "Profile updated successfully",
+            user: {
+                _id: user._id,
+                username: user.username,
+                email: user.email, // keep email read-only for now
+                phone: user.phone,
+                role: user.role,
+                status: user.status,
+                createdAt: user.createdAt,
+            },
+        });
+    } catch (error) {
+        console.error("Error updating profile:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Internal server error",
+        });
+    }
+};
+
+module.exports = { registerUser, loginUser, logoutUser, changePassword, addUser, editUser, deleteUser, getAllUsers, refreshToken, updateUserStatus, getMe, updateProfileInfo };

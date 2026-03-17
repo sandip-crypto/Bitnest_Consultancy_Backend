@@ -13,6 +13,9 @@ const studentRoutes = require("./src/routes/student.routes");
 const contactInquiryRoutes = require("./src/routes/contactInquiry.routes");
 const faqRoutes = require("./src/routes/faq.routes");
 const publicLeadRoutes = require("./src/routes/publicLead.routes");
+const securityRoutes = require("./src/routes/security.routes");
+const adminUserRoutes = require("./src/routes/adminUser.routes");
+const settingsRoutes = require("./src/routes/settings.routes");
 
 
 // const mongoSanitize = require("express-mongo-sanitize");
@@ -68,6 +71,9 @@ app.use("/api/v1/students", studentRoutes);
 app.use("/api/v1/contact-inquiries", contactInquiryRoutes);
 app.use("/api/v1/faqs", faqRoutes);
 app.use("/api/v1/public-leads", publicLeadRoutes);
+app.use("/api/v1/security", securityRoutes);
+app.use("/api/v1/admin-users", adminUserRoutes);
+app.use("/api/v1/settings", settingsRoutes);
 
 
 // Global Error Handler
